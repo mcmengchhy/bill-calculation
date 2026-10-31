@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useState, useMemo, useCallback } from "react";
+import React, { useState, useMemo, useCallback, useEffect } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import confetti from "canvas-confetti";
 import {
@@ -25,6 +25,10 @@ import {
   Wallet,
   Pencil,
   RotateCcw,
+  History,
+  Save,
+  FolderOpen,
+  X,
 } from "lucide-react";
 import {
   Person,
@@ -45,6 +49,25 @@ interface CurrencyOption {
   label: string;
   decimals: number;
 }
+
+export interface PartyHistoryEntry {
+  id: string;
+  title: string;
+  savedAt: string; // ISO string
+  baseTimeIn: string;
+  baseTimeOut: string;
+  splitMode: "time" | "equal";
+  serviceChargePercent: number;
+  currencyCode: string;
+  people: Person[];
+  customTimePersonIds: string[];
+  payments: PaymentItem[];
+  settledTransferIds: string[];
+  totalSharedPool: number;
+}
+
+const ACTIVE_CACHE_KEY = "partysplit:active:v1";
+const HISTORY_CACHE_KEY = "partysplit:history:v1";
 
 const CURRENCIES: CurrencyOption[] = [
   { code: "USD", symbol: "$", label: "USD ($)", decimals: 2 },
@@ -148,6 +171,15 @@ function adjustTimeString(timeStr: string, deltaMinutes: number): string {
 }
 
 export default function PartyBillCalculator() {
+  // Hydration flag for localStorage cache
+  const [isHydrated, setIsHydrated] = useState<boolean>(false);
+
+  // Party session title & history drawer state
+  const [partyTitle, setPartyTitle] = useState<string>("Friday Night Party");
+  const [historyEntries, setHistoryEntries] = useState<PartyHistoryEntry[]>([]);
+  const [showHistoryPanel, setShowHistoryPanel] = useState<boolean>(false);
+  const [justSavedHistory, setJustSavedHistory] = useState<boolean>(false);
+
   // Base Party Time (First input sets the base time for all next people)
   const [baseTimeIn, setBaseTimeIn] = useState<string>("18:00");
   const [baseTimeOut, setBaseTimeOut] = useState<string>("23:00");
@@ -179,6 +211,85 @@ export default function PartyBillCalculator() {
   const [settledTransferIds, setSettledTransferIds] = useState<Set<string>>(new Set());
   const [copiedSummary, setCopiedSummary] = useState<boolean>(false);
 
+  // Load cached active workspace + saved history from localStorage on mount
+  useEffect(() => {
+    try {
+      const rawActive = localStorage.getItem(ACTIVE_CACHE_KEY);
+      if (rawActive) {
+        const parsed = JSON.parse(rawActive);
+        if (parsed && typeof parsed === "object") {
+          if (typeof parsed.partyTitle === "string") setPartyTitle(parsed.partyTitle);
+          if (typeof parsed.baseTimeIn === "string") setBaseTimeIn(parsed.baseTimeIn);
+          if (typeof parsed.baseTimeOut === "string") setBaseTimeOut(parsed.baseTimeOut);
+          if (parsed.splitMode === "time" || parsed.splitMode === "equal") {
+            setSplitMode(parsed.splitMode);
+          }
+          if (typeof parsed.serviceChargePercent === "number") {
+            setServiceChargePercent(parsed.serviceChargePercent);
+          }
+          if (typeof parsed.currencyCode === "string") {
+            const matchedCurr = CURRENCIES.find((c) => c.code === parsed.currencyCode);
+            if (matchedCurr) setCurrency(matchedCurr);
+          }
+          if (Array.isArray(parsed.people)) setPeople(parsed.people);
+          if (Array.isArray(parsed.customTimePersonIds)) {
+            setCustomTimePersonIds(new Set(parsed.customTimePersonIds));
+          }
+          if (Array.isArray(parsed.payments)) setPayments(parsed.payments);
+          if (Array.isArray(parsed.settledTransferIds)) {
+            setSettledTransferIds(new Set(parsed.settledTransferIds));
+          }
+        }
+      }
+
+      const rawHistory = localStorage.getItem(HISTORY_CACHE_KEY);
+      if (rawHistory) {
+        const parsedHistory = JSON.parse(rawHistory);
+        if (Array.isArray(parsedHistory)) {
+          setHistoryEntries(parsedHistory);
+        }
+      }
+    } catch {
+      // Ignore malformed storage data
+    } finally {
+      setIsHydrated(true);
+    }
+  }, []);
+
+  // Auto-persist active party state to localStorage cache whenever anything changes
+  useEffect(() => {
+    if (!isHydrated) return;
+    try {
+      const payload = {
+        partyTitle,
+        baseTimeIn,
+        baseTimeOut,
+        splitMode,
+        serviceChargePercent,
+        currencyCode: currency.code,
+        people,
+        customTimePersonIds: Array.from(customTimePersonIds),
+        payments,
+        settledTransferIds: Array.from(settledTransferIds),
+      };
+      localStorage.setItem(ACTIVE_CACHE_KEY, JSON.stringify(payload));
+    } catch {
+      // Ignore quota errors
+    }
+  }, [
+    isHydrated,
+    partyTitle,
+    baseTimeIn,
+    baseTimeOut,
+    splitMode,
+    serviceChargePercent,
+    currency.code,
+    people,
+    customTimePersonIds,
+    payments,
+    settledTransferIds,
+  ]);
+
   // Ensure paymentPaidBy always points to an existing person or the Unpaid Bill Pot
   const effectivePaidBy = useMemo(() => {
     if (paymentPaidBy === UNPAID_BILL_POT_ID) return UNPAID_BILL_POT_ID;
@@ -188,13 +299,14 @@ export default function PartyBillCalculator() {
 
   // Format currency helper
   const formatMoney = useCallback(
-    (value: number) => {
+    (value: number, customCurrency?: CurrencyOption) => {
+      const targetCurr = customCurrency ?? currency;
       const absVal = Math.abs(value);
       const formatted = absVal.toLocaleString("en-US", {
-        minimumFractionDigits: currency.decimals,
-        maximumFractionDigits: currency.decimals,
+        minimumFractionDigits: targetCurr.decimals,
+        maximumFractionDigits: targetCurr.decimals,
       });
-      return `${value < -0.005 ? "-" : ""}${currency.symbol}${formatted}`;
+      return `${value < -0.005 ? "-" : ""}${targetCurr.symbol}${formatted}`;
     },
     [currency]
   );
@@ -208,6 +320,85 @@ export default function PartyBillCalculator() {
       }),
     [people, payments, splitMode, serviceChargePercent]
   );
+
+  // Save current party snapshot to History Cache
+  const handleSaveToHistory = () => {
+    sound.playSettleSuccess();
+    const titleToSave =
+      partyTitle.trim() || `Party Bill (${new Date().toLocaleDateString()})`;
+    const newEntry: PartyHistoryEntry = {
+      id: `hist-${Date.now()}`,
+      title: titleToSave,
+      savedAt: new Date().toISOString(),
+      baseTimeIn,
+      baseTimeOut,
+      splitMode,
+      serviceChargePercent,
+      currencyCode: currency.code,
+      people,
+      customTimePersonIds: Array.from(customTimePersonIds),
+      payments,
+      settledTransferIds: Array.from(settledTransferIds),
+      totalSharedPool: calculation.totalSharedPool,
+    };
+
+    setHistoryEntries((prev) => {
+      const updated = [newEntry, ...prev].slice(0, 30); // Keep up to 30 snapshots
+      try {
+        localStorage.setItem(HISTORY_CACHE_KEY, JSON.stringify(updated));
+      } catch {
+        // Ignore storage errors
+      }
+      return updated;
+    });
+
+    setJustSavedHistory(true);
+    setTimeout(() => setJustSavedHistory(false), 2000);
+  };
+
+  // Load a saved party bill from History Cache
+  const handleLoadHistoryEntry = (entry: PartyHistoryEntry) => {
+    sound.playSettleSuccess();
+    setPartyTitle(entry.title);
+    setBaseTimeIn(entry.baseTimeIn);
+    setBaseTimeOut(entry.baseTimeOut);
+    setSplitMode(entry.splitMode);
+    setServiceChargePercent(entry.serviceChargePercent);
+    const matchedCurr = CURRENCIES.find((c) => c.code === entry.currencyCode);
+    if (matchedCurr) setCurrency(matchedCurr);
+    setPeople(entry.people);
+    setCustomTimePersonIds(new Set(entry.customTimePersonIds));
+    setPayments(entry.payments);
+    setSettledTransferIds(new Set(entry.settledTransferIds));
+    setPaymentPaidBy(entry.people[0]?.id ?? UNPAID_BILL_POT_ID);
+    setEditingTimePersonId(null);
+    setShowHistoryPanel(false);
+  };
+
+  // Delete single history entry
+  const handleDeleteHistoryEntry = (id: string) => {
+    sound.playRemove();
+    setHistoryEntries((prev) => {
+      const updated = prev.filter((item) => item.id !== id);
+      try {
+        localStorage.setItem(HISTORY_CACHE_KEY, JSON.stringify(updated));
+      } catch {
+        // Ignore storage errors
+      }
+      return updated;
+    });
+  };
+
+  // Clear all saved history
+  const handleClearAllHistory = () => {
+    sound.playRemove();
+    setHistoryEntries([]);
+    try {
+      localStorage.removeItem(HISTORY_CACHE_KEY);
+    } catch {
+      // Ignore storage errors
+    }
+  };
 
   // Sound toggle handler
   const toggleSound = () => {
@@ -455,6 +646,7 @@ export default function PartyBillCalculator() {
 
   const handleResetDemo = () => {
     sound.playSettleSuccess();
+    setPartyTitle("Friday Night Party");
     setBaseTimeIn("18:00");
     setBaseTimeOut("23:00");
     setPeople(INITIAL_PEOPLE);
@@ -478,7 +670,7 @@ export default function PartyBillCalculator() {
   const handleCopySummary = () => {
     sound.playSettleSuccess();
     const lines: string[] = [
-      `🎉 PARTY BILL CALCULATOR SUMMARY`,
+      `🎉 ${partyTitle.toUpperCase()} — BILL SUMMARY`,
       `⏱️ Base Party Window: ${baseTimeIn} → ${baseTimeOut} (${
         splitMode === "time" ? "Time-Weighted Fair Split" : "Equal Headcount Split"
       })`,
@@ -548,17 +740,55 @@ export default function PartyBillCalculator() {
                 <h1 className="text-xl sm:text-2xl font-bold tracking-tight bg-gradient-to-r from-white via-indigo-200 to-fuchsia-200 bg-clip-text text-transparent">
                   PartySplit Time-Sync
                 </h1>
-                <span className="hidden sm:inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-xs font-medium bg-indigo-500/15 text-indigo-300 border border-indigo-500/30">
-                  <Sparkles className="w-3 h-3" /> Time In / Out Fair Bill
+                <span className="hidden sm:inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-xs font-medium bg-emerald-500/15 text-emerald-300 border border-emerald-500/30">
+                  <Sparkles className="w-3 h-3" /> Auto-Cached
                 </span>
               </div>
               <p className="text-xs text-slate-400">
-                Set base Time In & Time Out once — new people inherit it automatically, and you can update anyone later
+                Set base Time In & Time Out once — auto-saved in browser cache with History snapshots
               </p>
             </div>
           </div>
 
-          <div className="flex items-center gap-2.5 flex-wrap">
+          <div className="flex items-center gap-2 flex-wrap">
+            {/* Save Current Party to History Cache */}
+            <motion.button
+              whileTap={{ scale: 0.94 }}
+              type="button"
+              onClick={handleSaveToHistory}
+              className="flex items-center gap-1.5 px-3 py-2 rounded-xl text-xs font-semibold bg-indigo-600 hover:bg-indigo-500 text-white shadow-md shadow-indigo-600/25 transition-all cursor-pointer"
+            >
+              {justSavedHistory ? (
+                <>
+                  <Check className="w-3.5 h-3.5" />
+                  <span>Saved to Cache!</span>
+                </>
+              ) : (
+                <>
+                  <Save className="w-3.5 h-3.5" />
+                  <span>Save Snapshot</span>
+                </>
+              )}
+            </motion.button>
+
+            {/* Open History Drawer Button */}
+            <motion.button
+              whileTap={{ scale: 0.94 }}
+              type="button"
+              onClick={() => {
+                sound.playSwitch();
+                setShowHistoryPanel((prev) => !prev);
+              }}
+              className={`flex items-center gap-1.5 px-3 py-2 rounded-xl text-xs font-semibold border transition-all cursor-pointer ${
+                showHistoryPanel
+                  ? "bg-fuchsia-600 border-fuchsia-500 text-white"
+                  : "bg-slate-900 border-white/10 text-slate-200 hover:border-fuchsia-500/40"
+              }`}
+            >
+              <History className="w-3.5 h-3.5 text-fuchsia-400" />
+              <span>History ({historyEntries.length})</span>
+            </motion.button>
+
             {/* Split Mode Toggle */}
             <div className="flex items-center bg-slate-900/90 border border-white/10 rounded-xl p-1">
               <button
@@ -573,7 +803,7 @@ export default function PartyBillCalculator() {
                     : "text-slate-400 hover:text-white"
                 }`}
               >
-                ⏱️ By Time In/Out
+                ⏱️ By Time
               </button>
               <button
                 type="button"
@@ -587,7 +817,7 @@ export default function PartyBillCalculator() {
                     : "text-slate-400 hover:text-white"
                 }`}
               >
-                ⚖️ Flat Equal
+                ⚖️ Equal
               </button>
             </div>
 
@@ -601,7 +831,7 @@ export default function PartyBillCalculator() {
                     sound.playSwitch();
                     setCurrency(c);
                   }}
-                  className={`px-2.5 py-1 rounded-lg text-xs font-semibold transition-all cursor-pointer ${
+                  className={`px-2 py-1 rounded-lg text-xs font-semibold transition-all cursor-pointer ${
                     currency.code === c.code
                       ? "bg-indigo-600 text-white shadow-sm"
                       : "text-slate-400 hover:text-white"
@@ -617,7 +847,7 @@ export default function PartyBillCalculator() {
               whileTap={{ scale: 0.93 }}
               type="button"
               onClick={toggleSound}
-              className={`flex items-center gap-1.5 px-3 py-2 rounded-xl text-xs font-medium border transition-all cursor-pointer ${
+              className={`flex items-center gap-1.5 px-2.5 py-2 rounded-xl text-xs font-medium border transition-all cursor-pointer ${
                 soundEnabled
                   ? "bg-emerald-500/15 border-emerald-500/30 text-emerald-300 hover:bg-emerald-500/25"
                   : "bg-slate-900 border-white/10 text-slate-400 hover:text-slate-200"
@@ -625,15 +855,9 @@ export default function PartyBillCalculator() {
               title="Toggle UI Sound Effects"
             >
               {soundEnabled ? (
-                <>
-                  <Volume2 className="w-4 h-4 text-emerald-400" />
-                  <span className="hidden sm:inline">Sound ON</span>
-                </>
+                <Volume2 className="w-4 h-4 text-emerald-400" />
               ) : (
-                <>
-                  <VolumeX className="w-4 h-4 text-slate-500" />
-                  <span className="hidden sm:inline">Muted</span>
-                </>
+                <VolumeX className="w-4 h-4 text-slate-500" />
               )}
             </motion.button>
 
@@ -642,16 +866,154 @@ export default function PartyBillCalculator() {
               whileTap={{ scale: 0.95 }}
               type="button"
               onClick={handleResetDemo}
-              className="flex items-center gap-1.5 px-3 py-2 rounded-xl text-xs font-medium bg-slate-900 hover:bg-slate-800 border border-white/10 text-slate-300 transition-colors cursor-pointer"
+              className="flex items-center gap-1.5 px-2.5 py-2 rounded-xl text-xs font-medium bg-slate-900 hover:bg-slate-800 border border-white/10 text-slate-300 transition-colors cursor-pointer"
+              title="Reset to Demo Party"
             >
               <RefreshCw className="w-3.5 h-3.5" />
-              <span>Demo Party</span>
+              <span className="hidden sm:inline">Demo</span>
             </motion.button>
           </div>
         </div>
       </header>
 
       <main className="relative z-10 max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 pt-6 space-y-6">
+        {/* CACHED HISTORY PANEL (Collapsible) */}
+        <AnimatePresence>
+          {showHistoryPanel ? (
+            <motion.section
+              initial={{ opacity: 0, height: 0, y: -10 }}
+              animate={{ opacity: 1, height: "auto", y: 0 }}
+              exit={{ opacity: 0, height: 0, y: -10 }}
+              className="overflow-hidden"
+            >
+              <div className="rounded-2xl bg-slate-900/95 backdrop-blur-xl border border-fuchsia-500/40 p-5 shadow-2xl space-y-4">
+                <div className="flex flex-wrap items-center justify-between gap-3">
+                  <div className="flex items-center gap-2.5">
+                    <div className="w-9 h-9 rounded-xl bg-fuchsia-500/20 border border-fuchsia-500/40 flex items-center justify-center">
+                      <History className="w-5 h-5 text-fuchsia-400" />
+                    </div>
+                    <div>
+                      <h2 className="text-base font-bold text-white">
+                        Cached Party History ({historyEntries.length} Saved)
+                      </h2>
+                      <p className="text-xs text-slate-400">
+                        Stored in browser local cache. Click any saved party bill to restore it immediately.
+                      </p>
+                    </div>
+                  </div>
+
+                  <div className="flex items-center gap-2">
+                    {historyEntries.length > 0 ? (
+                      <button
+                        type="button"
+                        onClick={handleClearAllHistory}
+                        className="px-3 py-1.5 rounded-lg text-xs font-medium bg-rose-500/15 hover:bg-rose-500/25 text-rose-300 border border-rose-500/30 cursor-pointer"
+                      >
+                        Clear All History
+                      </button>
+                    ) : null}
+                    <button
+                      type="button"
+                      onClick={() => setShowHistoryPanel(false)}
+                      className="p-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 cursor-pointer"
+                    >
+                      <X className="w-4 h-4" />
+                    </button>
+                  </div>
+                </div>
+
+                {/* Save Current Party with Custom Title Bar */}
+                <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-2.5 p-3 rounded-xl bg-slate-950/80 border border-white/10">
+                  <input
+                    type="text"
+                    value={partyTitle}
+                    onChange={(e) => setPartyTitle(e.target.value)}
+                    placeholder="Party / Event Name (e.g. Friday BBQ & KTV)..."
+                    className="flex-1 px-3 py-2 rounded-lg bg-slate-900 border border-white/10 text-sm text-white placeholder-slate-500 focus:outline-none focus:border-fuchsia-500"
+                  />
+                  <button
+                    type="button"
+                    onClick={handleSaveToHistory}
+                    className="px-4 py-2 rounded-lg bg-fuchsia-600 hover:bg-fuchsia-500 text-white text-xs font-bold flex items-center justify-center gap-1.5 cursor-pointer shrink-0"
+                  >
+                    <Save className="w-4 h-4" />
+                    <span>Save Current Party to Cache</span>
+                  </button>
+                </div>
+
+                {/* History Cards Grid */}
+                {historyEntries.length > 0 ? (
+                  <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3 max-h-80 overflow-y-auto pr-1">
+                    {historyEntries.map((entry) => {
+                      const entryCurr =
+                        CURRENCIES.find((c) => c.code === entry.currencyCode) ??
+                        CURRENCIES[0];
+                      const dateStr = new Date(entry.savedAt).toLocaleString([], {
+                        month: "short",
+                        day: "numeric",
+                        hour: "2-digit",
+                        minute: "2-digit",
+                      });
+
+                      return (
+                        <div
+                          key={entry.id}
+                          className="p-3.5 rounded-xl bg-slate-950/90 border border-white/10 hover:border-fuchsia-500/40 transition-all flex flex-col justify-between gap-3"
+                        >
+                          <div>
+                            <div className="flex items-start justify-between gap-2">
+                              <h3 className="text-sm font-bold text-white truncate">
+                                {entry.title}
+                              </h3>
+                              <span className="text-[11px] text-slate-400 shrink-0">
+                                {dateStr}
+                              </span>
+                            </div>
+                            <div className="mt-1.5 flex items-center gap-2 text-xs text-slate-400 flex-wrap">
+                              <span className="text-fuchsia-300 font-semibold">
+                                {formatMoney(entry.totalSharedPool, entryCurr)}
+                              </span>
+                              <span>•</span>
+                              <span>{entry.people.length} people</span>
+                              <span>•</span>
+                              <span>
+                                {entry.baseTimeIn}→{entry.baseTimeOut}
+                              </span>
+                            </div>
+                          </div>
+
+                          <div className="flex items-center justify-between gap-2 pt-2 border-t border-white/5">
+                            <button
+                              type="button"
+                              onClick={() => handleLoadHistoryEntry(entry)}
+                              className="flex-1 py-1.5 px-3 rounded-lg bg-indigo-600/20 hover:bg-indigo-600 text-indigo-200 hover:text-white text-xs font-semibold transition-colors flex items-center justify-center gap-1.5 cursor-pointer"
+                            >
+                              <FolderOpen className="w-3.5 h-3.5" />
+                              <span>Load Party</span>
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => handleDeleteHistoryEntry(entry.id)}
+                              className="p-1.5 rounded-lg bg-slate-900 hover:bg-rose-500/20 text-slate-400 hover:text-rose-400 cursor-pointer"
+                              title="Delete snapshot"
+                            >
+                              <Trash2 className="w-3.5 h-3.5" />
+                            </button>
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                ) : (
+                  <div className="text-center py-6 text-xs text-slate-400 border border-dashed border-white/10 rounded-xl">
+                    No saved history snapshots yet. Click <strong>Save Snapshot</strong> to store your current party bill in history!
+                  </div>
+                )}
+              </div>
+            </motion.section>
+          ) : null}
+        </AnimatePresence>
+
         {/* Top Live KPI Cards */}
         <section className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
           <motion.div
