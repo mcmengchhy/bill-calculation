@@ -1,20 +1,22 @@
 export type PaymentCategory = "food" | "drinks" | "venue" | "treat" | "other";
 
+export const UNPAID_BILL_POT_ID = "__party_pot__";
+
 export interface Person {
   id: string;
   name: string;
   avatarColor: string;
   timeIn: string; // "HH:mm"
   timeOut: string; // "HH:mm"
-  isFreePass: boolean; // Special VIP / Exempt user (not counted in bill split)
+  isFreePass: boolean; // Special VIP / Exempt username (not counted in bill split)
 }
 
 export interface PaymentItem {
   id: string;
   title: string;
   amount: number;
-  paidByPersonId: string;
-  isFreePayment: boolean; // Special Free Payment by selected username (not counted in shared split)
+  paidByPersonId: string; // Person.id or UNPAID_BILL_POT_ID
+  isFreePayment: boolean; // Special Free Payment treat (not counted in shared split)
   category: PaymentCategory;
 }
 
@@ -38,6 +40,7 @@ export interface SettlementTransfer {
   fromPerson: Person;
   toPerson: Person;
   amount: number;
+  isToPot?: boolean;
 }
 
 export interface PartyCalculationResult {
@@ -107,23 +110,41 @@ export function calculatePartyBill(
   let subtotalShared = 0;
   let totalFreePayments = 0;
 
+  const peopleIds = new Set(people.map((p) => p.id));
   const paidSharedByPerson = new Map<string, number>();
   const paidFreeByPerson = new Map<string, number>();
+  let unpaidPotAmount = 0;
 
   for (const payment of payments) {
-    const validAmount = Number.isFinite(payment.amount) && payment.amount > 0 ? payment.amount : 0;
+    const validAmount =
+      Number.isFinite(payment.amount) && payment.amount > 0 ? payment.amount : 0;
+
+    // Resolve payer: if paidByPersonId is not a valid person and not explicitly the pot,
+    // fall back to first person if available, or pot.
+    const resolvedPayerId = peopleIds.has(payment.paidByPersonId)
+      ? payment.paidByPersonId
+      : payment.paidByPersonId === UNPAID_BILL_POT_ID
+      ? UNPAID_BILL_POT_ID
+      : people[0]?.id ?? UNPAID_BILL_POT_ID;
+
     if (payment.isFreePayment) {
       totalFreePayments += validAmount;
-      paidFreeByPerson.set(
-        payment.paidByPersonId,
-        (paidFreeByPerson.get(payment.paidByPersonId) ?? 0) + validAmount
-      );
+      if (resolvedPayerId !== UNPAID_BILL_POT_ID) {
+        paidFreeByPerson.set(
+          resolvedPayerId,
+          (paidFreeByPerson.get(resolvedPayerId) ?? 0) + validAmount
+        );
+      }
     } else {
       subtotalShared += validAmount;
-      paidSharedByPerson.set(
-        payment.paidByPersonId,
-        (paidSharedByPerson.get(payment.paidByPersonId) ?? 0) + validAmount
-      );
+      if (resolvedPayerId === UNPAID_BILL_POT_ID) {
+        unpaidPotAmount += validAmount;
+      } else {
+        paidSharedByPerson.set(
+          resolvedPayerId,
+          (paidSharedByPerson.get(resolvedPayerId) ?? 0) + validAmount
+        );
+      }
     }
   }
 
@@ -137,7 +158,8 @@ export function calculatePartyBill(
     const durationMinutes = getDurationMinutes(person.timeIn, person.timeOut);
     let effectiveWeight = 0;
     if (!person.isFreePass) {
-      effectiveWeight = splitMode === "time" ? durationMinutes : durationMinutes > 0 ? 1 : 0;
+      effectiveWeight =
+        splitMode === "time" ? durationMinutes : durationMinutes > 0 ? 1 : 0;
     }
     return {
       person,
@@ -146,7 +168,10 @@ export function calculatePartyBill(
     };
   });
 
-  const totalWeight = rawBreakdowns.reduce((sum, item) => sum + item.effectiveWeight, 0);
+  const totalWeight = rawBreakdowns.reduce(
+    (sum, item) => sum + item.effectiveWeight,
+    0
+  );
   const totalPartyMinutes = rawBreakdowns.reduce(
     (sum, item) => sum + (item.person.isFreePass ? 0 : item.durationMinutes),
     0
@@ -210,8 +235,29 @@ export function calculatePartyBill(
 
   const creditors = personBreakdowns
     .filter((b) => b.netBalance > 0.005)
-    .map((b) => ({ person: b.person, amount: b.netBalance }))
+    .map((b) => ({
+      person: b.person,
+      amount: b.netBalance,
+      isToPot: false,
+    }))
     .sort((a, b) => b.amount - a.amount);
+
+  // Any unpaid bill amount or service charge not yet fronted by a person goes to Cashier / Party Bill Pot
+  const unpaidPlusService = unpaidPotAmount + serviceChargeAmount;
+  if (unpaidPlusService > 0.005) {
+    creditors.push({
+      person: {
+        id: UNPAID_BILL_POT_ID,
+        name: "🧾 Cashier / Bill Pot",
+        avatarColor: "from-slate-600 to-slate-800",
+        timeIn: "00:00",
+        timeOut: "00:00",
+        isFreePass: false,
+      },
+      amount: unpaidPlusService,
+      isToPot: true,
+    });
+  }
 
   const settlements: SettlementTransfer[] = [];
   let i = 0;
@@ -228,6 +274,7 @@ export function calculatePartyBill(
         fromPerson: debtor.person,
         toPerson: creditor.person,
         amount: transferAmount,
+        isToPot: creditor.isToPot,
       });
     }
 

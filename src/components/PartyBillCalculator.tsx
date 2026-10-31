@@ -20,15 +20,17 @@ import {
   Copy,
   Check,
   Calculator,
-  SlidersHorizontal,
   PartyPopper,
   Info,
   Wallet,
+  Pencil,
+  RotateCcw,
 } from "lucide-react";
 import {
   Person,
   PaymentItem,
   PaymentCategory,
+  UNPAID_BILL_POT_ID,
   AVATAR_GRADIENTS,
   calculatePartyBill,
   formatDuration,
@@ -146,19 +148,23 @@ function adjustTimeString(timeStr: string, deltaMinutes: number): string {
 }
 
 export default function PartyBillCalculator() {
-  // Global Party Fixed Parameters
-  const [defaultTimeIn, setDefaultTimeIn] = useState<string>("18:00");
-  const [defaultTimeOut, setDefaultTimeOut] = useState<string>("23:00");
+  // Base Party Time (First input sets the base time for all next people)
+  const [baseTimeIn, setBaseTimeIn] = useState<string>("18:00");
+  const [baseTimeOut, setBaseTimeOut] = useState<string>("23:00");
   const [splitMode, setSplitMode] = useState<"time" | "equal">("time");
   const [serviceChargePercent, setServiceChargePercent] = useState<number>(0);
   const [currency, setCurrency] = useState<CurrencyOption>(CURRENCIES[0]);
   const [soundEnabled, setSoundEnabled] = useState<boolean>(true);
 
-  // People state
+  // People state + tracking which people had their time custom-updated later
   const [people, setPeople] = useState<Person[]>(INITIAL_PEOPLE);
+  const [customTimePersonIds, setCustomTimePersonIds] = useState<Set<string>>(
+    () => new Set(["p-3", "p-4"])
+  );
+  const [editingTimePersonId, setEditingTimePersonId] = useState<string | null>(null);
+
+  // Add Person form state (uses baseTimeIn & baseTimeOut automatically!)
   const [newPersonName, setNewPersonName] = useState<string>("");
-  const [newPersonTimeIn, setNewPersonTimeIn] = useState<string>("18:00");
-  const [newPersonTimeOut, setNewPersonTimeOut] = useState<string>("23:00");
   const [newPersonIsFreePass, setNewPersonIsFreePass] = useState<boolean>(false);
 
   // Payment form state
@@ -172,6 +178,13 @@ export default function PartyBillCalculator() {
   // Settlement tracking state
   const [settledTransferIds, setSettledTransferIds] = useState<Set<string>>(new Set());
   const [copiedSummary, setCopiedSummary] = useState<boolean>(false);
+
+  // Ensure paymentPaidBy always points to an existing person or the Unpaid Bill Pot
+  const effectivePaidBy = useMemo(() => {
+    if (paymentPaidBy === UNPAID_BILL_POT_ID) return UNPAID_BILL_POT_ID;
+    if (people.some((p) => p.id === paymentPaidBy)) return paymentPaidBy;
+    return people[0]?.id ?? UNPAID_BILL_POT_ID;
+  }, [people, paymentPaidBy]);
 
   // Format currency helper
   const formatMoney = useCallback(
@@ -206,30 +219,40 @@ export default function PartyBillCalculator() {
     }
   };
 
-  // Sync fixed Time In / Time Out to new person inputs or all members
-  const handleFixedTimeChange = (field: "in" | "out", value: string) => {
+  // When Base Time In / Out changes, update everyone who hasn't been custom-updated later
+  const handleBaseTimeChange = (field: "in" | "out", value: string) => {
     sound.playTimeTick();
     if (field === "in") {
-      setDefaultTimeIn(value);
-      setNewPersonTimeIn(value);
+      setBaseTimeIn(value);
+      setPeople((prev) =>
+        prev.map((person) =>
+          customTimePersonIds.has(person.id) ? person : { ...person, timeIn: value }
+        )
+      );
     } else {
-      setDefaultTimeOut(value);
-      setNewPersonTimeOut(value);
+      setBaseTimeOut(value);
+      setPeople((prev) =>
+        prev.map((person) =>
+          customTimePersonIds.has(person.id) ? person : { ...person, timeOut: value }
+        )
+      );
     }
   };
 
-  const applyFixedTimeToAll = () => {
+  const resetAllPeopleToBaseTime = () => {
     sound.playSwitch();
+    setCustomTimePersonIds(new Set());
+    setEditingTimePersonId(null);
     setPeople((prev) =>
       prev.map((person) => ({
         ...person,
-        timeIn: defaultTimeIn,
-        timeOut: defaultTimeOut,
+        timeIn: baseTimeIn,
+        timeOut: baseTimeOut,
       }))
     );
   };
 
-  // Add Person handler
+  // Add Person handler — automatically inherits Base Time In & Base Time Out!
   const handleAddPerson = (e: React.FormEvent) => {
     e.preventDefault();
     const trimmed = newPersonName.trim();
@@ -240,8 +263,8 @@ export default function PartyBillCalculator() {
       id,
       name: trimmed,
       avatarColor: AVATAR_GRADIENTS[people.length % AVATAR_GRADIENTS.length],
-      timeIn: newPersonTimeIn || defaultTimeIn,
-      timeOut: newPersonTimeOut || defaultTimeOut,
+      timeIn: baseTimeIn,
+      timeOut: baseTimeOut,
       isFreePass: newPersonIsFreePass,
     };
 
@@ -251,18 +274,29 @@ export default function PartyBillCalculator() {
       sound.playPop();
     }
 
-    setPeople((prev) => [...prev, nextPerson]);
-    if (!paymentPaidBy) {
-      setPaymentPaidBy(id);
-    }
+    setPeople((prev) => {
+      const updated = [...prev, nextPerson];
+      if (prev.length === 0) {
+        setPaymentPaidBy(id);
+      }
+      return updated;
+    });
     setNewPersonName("");
-    setNewPersonTimeIn(defaultTimeIn);
-    setNewPersonTimeOut(defaultTimeOut);
     setNewPersonIsFreePass(false);
   };
 
-  const handleUpdatePersonTime = (personId: string, field: "timeIn" | "timeOut", value: string) => {
+  // Update individual person's Time In / Time Out later
+  const handleUpdatePersonTime = (
+    personId: string,
+    field: "timeIn" | "timeOut",
+    value: string
+  ) => {
     sound.playTimeTick();
+    setCustomTimePersonIds((prev) => {
+      const next = new Set(prev);
+      next.add(personId);
+      return next;
+    });
     setPeople((prev) =>
       prev.map((p) => (p.id === personId ? { ...p, [field]: value } : p))
     );
@@ -274,6 +308,11 @@ export default function PartyBillCalculator() {
     deltaMinutes: number
   ) => {
     sound.playTimeTick();
+    setCustomTimePersonIds((prev) => {
+      const next = new Set(prev);
+      next.add(personId);
+      return next;
+    });
     setPeople((prev) =>
       prev.map((p) =>
         p.id === personId
@@ -281,6 +320,21 @@ export default function PartyBillCalculator() {
           : p
       )
     );
+  };
+
+  const handleResetPersonToBaseTime = (personId: string) => {
+    sound.playSwitch();
+    setCustomTimePersonIds((prev) => {
+      const next = new Set(prev);
+      next.delete(personId);
+      return next;
+    });
+    setPeople((prev) =>
+      prev.map((p) =>
+        p.id === personId ? { ...p, timeIn: baseTimeIn, timeOut: baseTimeOut } : p
+      )
+    );
+    setEditingTimePersonId(null);
   };
 
   const handleTogglePersonFreePass = (personId: string) => {
@@ -302,11 +356,19 @@ export default function PartyBillCalculator() {
     sound.playRemove();
     setPeople((prev) => {
       const filtered = prev.filter((p) => p.id !== personId);
-      if (paymentPaidBy === personId && filtered.length > 0) {
-        setPaymentPaidBy(filtered[0].id);
+      if (paymentPaidBy === personId) {
+        setPaymentPaidBy(filtered[0]?.id ?? UNPAID_BILL_POT_ID);
       }
       return filtered;
     });
+    setCustomTimePersonIds((prev) => {
+      const next = new Set(prev);
+      next.delete(personId);
+      return next;
+    });
+    if (editingTimePersonId === personId) {
+      setEditingTimePersonId(null);
+    }
     setPayments((prev) => prev.filter((pay) => pay.paidByPersonId !== personId));
   };
 
@@ -314,7 +376,7 @@ export default function PartyBillCalculator() {
   const handleAddPayment = (e: React.FormEvent) => {
     e.preventDefault();
     const numAmount = parseFloat(paymentAmount);
-    if (!Number.isFinite(numAmount) || numAmount <= 0 || !paymentPaidBy) return;
+    if (!Number.isFinite(numAmount) || numAmount <= 0 || !effectivePaidBy) return;
 
     const finalTitle =
       paymentTitle.trim() ||
@@ -324,7 +386,7 @@ export default function PartyBillCalculator() {
       id: `pay-${Date.now()}`,
       title: finalTitle,
       amount: numAmount,
-      paidByPersonId: paymentPaidBy,
+      paidByPersonId: effectivePaidBy,
       isFreePayment: paymentIsFree,
       category: paymentIsFree ? "treat" : paymentCategory,
     };
@@ -393,17 +455,23 @@ export default function PartyBillCalculator() {
 
   const handleResetDemo = () => {
     sound.playSettleSuccess();
-    setDefaultTimeIn("18:00");
-    setDefaultTimeOut("23:00");
+    setBaseTimeIn("18:00");
+    setBaseTimeOut("23:00");
     setPeople(INITIAL_PEOPLE);
+    setCustomTimePersonIds(new Set(["p-3", "p-4"]));
+    setEditingTimePersonId(null);
     setPayments(INITIAL_PAYMENTS);
+    setPaymentPaidBy(INITIAL_PEOPLE[0].id);
     setSettledTransferIds(new Set());
   };
 
   const handleClearAll = () => {
     sound.playRemove();
     setPeople([]);
+    setCustomTimePersonIds(new Set());
+    setEditingTimePersonId(null);
     setPayments([]);
+    setPaymentPaidBy("");
     setSettledTransferIds(new Set());
   };
 
@@ -411,7 +479,7 @@ export default function PartyBillCalculator() {
     sound.playSettleSuccess();
     const lines: string[] = [
       `🎉 PARTY BILL CALCULATOR SUMMARY`,
-      `⏱️ Party Window: ${defaultTimeIn} → ${defaultTimeOut} (${
+      `⏱️ Base Party Window: ${baseTimeIn} → ${baseTimeOut} (${
         splitMode === "time" ? "Time-Weighted Fair Split" : "Equal Headcount Split"
       })`,
       `💰 Total Shared Bill: ${formatMoney(calculation.totalSharedPool)}`,
@@ -450,8 +518,8 @@ export default function PartyBillCalculator() {
     setTimeout(() => setCopiedSummary(false), 2200);
   };
 
-  const partyDefaultDuration = formatDuration(
-    getDurationMinutes(defaultTimeIn, defaultTimeOut)
+  const baseDurationFormatted = formatDuration(
+    getDurationMinutes(baseTimeIn, baseTimeOut)
   );
 
   return (
@@ -485,12 +553,44 @@ export default function PartyBillCalculator() {
                 </span>
               </div>
               <p className="text-xs text-slate-400">
-                Divide party invoices fairly by stay duration, with special Free Treats & VIP Free Passes
+                Set base Time In & Time Out once — new people inherit it automatically, and you can update anyone later
               </p>
             </div>
           </div>
 
           <div className="flex items-center gap-2.5 flex-wrap">
+            {/* Split Mode Toggle */}
+            <div className="flex items-center bg-slate-900/90 border border-white/10 rounded-xl p-1">
+              <button
+                type="button"
+                onClick={() => {
+                  sound.playSwitch();
+                  setSplitMode("time");
+                }}
+                className={`px-2.5 py-1 rounded-lg text-xs font-medium transition-all cursor-pointer ${
+                  splitMode === "time"
+                    ? "bg-gradient-to-r from-indigo-600 to-purple-600 text-white shadow"
+                    : "text-slate-400 hover:text-white"
+                }`}
+              >
+                ⏱️ By Time In/Out
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  sound.playSwitch();
+                  setSplitMode("equal");
+                }}
+                className={`px-2.5 py-1 rounded-lg text-xs font-medium transition-all cursor-pointer ${
+                  splitMode === "equal"
+                    ? "bg-gradient-to-r from-indigo-600 to-purple-600 text-white shadow"
+                    : "text-slate-400 hover:text-white"
+                }`}
+              >
+                ⚖️ Flat Equal
+              </button>
+            </div>
+
             {/* Currency Switcher */}
             <div className="flex items-center bg-slate-900/90 border border-white/10 rounded-xl p-1">
               {CURRENCIES.map((c) => (
@@ -552,106 +652,6 @@ export default function PartyBillCalculator() {
       </header>
 
       <main className="relative z-10 max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 pt-6 space-y-6">
-        {/* Fixed Party Time Parameters & Split Mode Bar */}
-        <motion.section
-          initial={{ opacity: 0, y: 12 }}
-          animate={{ opacity: 1, y: 0 }}
-          className="rounded-2xl bg-slate-900/75 backdrop-blur-xl border border-white/10 p-4 sm:p-5 shadow-xl"
-        >
-          <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-4">
-            <div className="flex items-start sm:items-center gap-3">
-              <div className="w-10 h-10 rounded-xl bg-indigo-500/15 border border-indigo-500/30 flex items-center justify-center shrink-0">
-                <SlidersHorizontal className="w-5 h-5 text-indigo-400" />
-              </div>
-              <div>
-                <h2 className="text-sm sm:text-base font-semibold text-white flex items-center gap-2">
-                  Fixed Party Parameters (Default Time In & Time Out)
-                  <span className="px-2 py-0.5 text-[11px] rounded-md bg-indigo-500/20 text-indigo-300 font-medium">
-                    {partyDefaultDuration} window
-                  </span>
-                </h2>
-                <p className="text-xs text-slate-400">
-                  Set the base party start & end time. Everyone pays equally per hour based on their individual Time In and Time Out.
-                </p>
-              </div>
-            </div>
-
-            <div className="flex flex-wrap items-center gap-3">
-              {/* Fixed Time In */}
-              <div className="flex items-center gap-2 bg-slate-950/90 border border-white/10 rounded-xl px-3 py-1.5">
-                <Clock className="w-3.5 h-3.5 text-indigo-400" />
-                <label htmlFor="fixed-time-in" className="text-xs text-slate-400">
-                  Party Time In:
-                </label>
-                <input
-                  id="fixed-time-in"
-                  type="time"
-                  value={defaultTimeIn}
-                  onChange={(e) => handleFixedTimeChange("in", e.target.value)}
-                  className="bg-transparent text-xs sm:text-sm font-semibold text-white focus:outline-none cursor-pointer"
-                />
-              </div>
-
-              {/* Fixed Time Out */}
-              <div className="flex items-center gap-2 bg-slate-950/90 border border-white/10 rounded-xl px-3 py-1.5">
-                <Clock className="w-3.5 h-3.5 text-fuchsia-400" />
-                <label htmlFor="fixed-time-out" className="text-xs text-slate-400">
-                  Party Time Out:
-                </label>
-                <input
-                  id="fixed-time-out"
-                  type="time"
-                  value={defaultTimeOut}
-                  onChange={(e) => handleFixedTimeChange("out", e.target.value)}
-                  className="bg-transparent text-xs sm:text-sm font-semibold text-white focus:outline-none cursor-pointer"
-                />
-              </div>
-
-              {/* Apply fixed window to everyone */}
-              <motion.button
-                whileTap={{ scale: 0.95 }}
-                type="button"
-                onClick={applyFixedTimeToAll}
-                className="px-3 py-2 rounded-xl text-xs font-medium bg-indigo-500/15 hover:bg-indigo-500/25 text-indigo-300 border border-indigo-500/30 transition-all cursor-pointer"
-              >
-                Sync All People to {defaultTimeIn}–{defaultTimeOut}
-              </motion.button>
-
-              {/* Split Mode Toggle */}
-              <div className="flex items-center bg-slate-950/90 border border-white/10 rounded-xl p-1">
-                <button
-                  type="button"
-                  onClick={() => {
-                    sound.playSwitch();
-                    setSplitMode("time");
-                  }}
-                  className={`px-3 py-1.5 rounded-lg text-xs font-medium transition-all cursor-pointer ${
-                    splitMode === "time"
-                      ? "bg-gradient-to-r from-indigo-600 to-purple-600 text-white shadow"
-                      : "text-slate-400 hover:text-white"
-                  }`}
-                >
-                  ⏱️ By Time In/Out
-                </button>
-                <button
-                  type="button"
-                  onClick={() => {
-                    sound.playSwitch();
-                    setSplitMode("equal");
-                  }}
-                  className={`px-3 py-1.5 rounded-lg text-xs font-medium transition-all cursor-pointer ${
-                    splitMode === "equal"
-                      ? "bg-gradient-to-r from-indigo-600 to-purple-600 text-white shadow"
-                      : "text-slate-400 hover:text-white"
-                  }`}
-                >
-                  ⚖️ Flat Equal
-                </button>
-              </div>
-            </div>
-          </div>
-        </motion.section>
-
         {/* Top Live KPI Cards */}
         <section className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
           <motion.div
@@ -746,9 +746,9 @@ export default function PartyBillCalculator() {
 
         {/* Main 12-Column Interactive Workspace */}
         <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
-          {/* LEFT 7 COLUMNS: 1) People & Time In/Out + 2) Payments by Username */}
+          {/* LEFT 7 COLUMNS: 1) Base Time & People + 2) Payments by Username */}
           <div className="lg:col-span-7 space-y-6">
-            {/* SECTION 1: PEOPLE IN THE PARTY & TIME IN / TIME OUT */}
+            {/* SECTION 1: BASE TIME + PARTY PEOPLE */}
             <section className="rounded-2xl bg-slate-900/80 backdrop-blur-xl border border-white/10 p-5 shadow-xl">
               <div className="flex items-center justify-between gap-2 mb-4">
                 <div className="flex items-center gap-2.5">
@@ -757,10 +757,10 @@ export default function PartyBillCalculator() {
                   </div>
                   <div>
                     <h2 className="text-base font-bold text-white">
-                      1. Party People & Time In / Time Out
+                      1. Base Party Time & People Roster
                     </h2>
                     <p className="text-xs text-slate-400">
-                      Add people, adjust their Time In & Time Out, or mark a VIP username as Free Pass
+                      Input Base Time In & Time Out once — all next people use it automatically. Click &ldquo;Update Time&rdquo; on any person later if needed.
                     </p>
                   </div>
                 </div>
@@ -769,62 +769,94 @@ export default function PartyBillCalculator() {
                 </span>
               </div>
 
-              {/* Add Person Form */}
+              {/* STEP 1A: FIRST INPUT — BASE TIME IN & TIME OUT */}
+              <div className="p-3.5 rounded-xl bg-gradient-to-r from-indigo-950/60 via-slate-950/90 to-fuchsia-950/40 border border-indigo-500/30 mb-3.5">
+                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                  <div>
+                    <div className="flex items-center gap-2">
+                      <Clock className="w-4 h-4 text-indigo-400" />
+                      <span className="text-xs font-bold uppercase tracking-wider text-indigo-300">
+                        Step 1: Base Time In & Time Out
+                      </span>
+                      <span className="px-2 py-0.5 rounded-md text-[11px] font-semibold bg-indigo-500/20 text-indigo-200">
+                        {baseDurationFormatted} base stay
+                      </span>
+                    </div>
+                    <p className="text-[11px] text-slate-400 mt-0.5">
+                      Every new person added below automatically uses this base time.
+                    </p>
+                  </div>
+
+                  <div className="flex flex-wrap items-center gap-2">
+                    <div className="flex items-center gap-2 bg-slate-900 border border-white/15 rounded-lg px-3 py-1.5">
+                      <label htmlFor="base-time-in" className="text-xs text-slate-400">
+                        Time In
+                      </label>
+                      <input
+                        id="base-time-in"
+                        type="time"
+                        value={baseTimeIn}
+                        onChange={(e) => handleBaseTimeChange("in", e.target.value)}
+                        className="bg-transparent text-sm font-bold text-indigo-200 focus:outline-none cursor-pointer"
+                      />
+                    </div>
+
+                    <span className="text-slate-500 font-bold">→</span>
+
+                    <div className="flex items-center gap-2 bg-slate-900 border border-white/15 rounded-lg px-3 py-1.5">
+                      <label htmlFor="base-time-out" className="text-xs text-slate-400">
+                        Time Out
+                      </label>
+                      <input
+                        id="base-time-out"
+                        type="time"
+                        value={baseTimeOut}
+                        onChange={(e) => handleBaseTimeChange("out", e.target.value)}
+                        className="bg-transparent text-sm font-bold text-fuchsia-200 focus:outline-none cursor-pointer"
+                      />
+                    </div>
+
+                    {customTimePersonIds.size > 0 ? (
+                      <button
+                        type="button"
+                        onClick={resetAllPeopleToBaseTime}
+                        className="px-2.5 py-1.5 rounded-lg text-[11px] font-medium bg-slate-900 hover:bg-indigo-500/20 text-slate-300 hover:text-indigo-200 border border-white/10 transition-colors cursor-pointer flex items-center gap-1"
+                        title="Reset everyone to Base Time"
+                      >
+                        <RotateCcw className="w-3 h-3" />
+                        <span>Reset All to Base</span>
+                      </button>
+                    ) : null}
+                  </div>
+                </div>
+              </div>
+
+              {/* STEP 1B: FAST ADD PERSON FORM (Auto-uses Base Time!) */}
               <form
                 onSubmit={handleAddPerson}
                 className="p-3.5 rounded-xl bg-slate-950/80 border border-white/10 space-y-3 mb-4"
               >
-                <div className="grid grid-cols-1 sm:grid-cols-12 gap-2.5">
-                  <div className="sm:col-span-5">
+                <div className="flex flex-col sm:flex-row gap-2.5">
+                  <div className="flex-1">
                     <label className="block text-[11px] font-medium text-slate-400 mb-1">
-                      Person / Username
-                    </label>
-                    <input
-                      type="text"
-                      placeholder="e.g. Meng, Dara, Pich..."
-                      value={newPersonName}
-                      onChange={(e) => setNewPersonName(e.target.value)}
-                      className="w-full px-3 py-2 rounded-lg bg-slate-900 border border-white/10 text-sm text-white placeholder-slate-500 focus:outline-none focus:border-indigo-500"
-                    />
-                  </div>
-
-                  <div className="sm:col-span-3">
-                    <label className="block text-[11px] font-medium text-slate-400 mb-1">
-                      Time In
-                    </label>
-                    <input
-                      type="time"
-                      value={newPersonTimeIn}
-                      onChange={(e) => {
-                        sound.playTimeTick();
-                        setNewPersonTimeIn(e.target.value);
-                      }}
-                      className="w-full px-2.5 py-2 rounded-lg bg-slate-900 border border-white/10 text-sm text-white focus:outline-none focus:border-indigo-500 cursor-pointer"
-                    />
-                  </div>
-
-                  <div className="sm:col-span-4">
-                    <label className="block text-[11px] font-medium text-slate-400 mb-1">
-                      Time Out
+                      Step 2: Add Person / Username (Automatically uses Base Time {baseTimeIn} → {baseTimeOut})
                     </label>
                     <div className="flex items-center gap-2">
                       <input
-                        type="time"
-                        value={newPersonTimeOut}
-                        onChange={(e) => {
-                          sound.playTimeTick();
-                          setNewPersonTimeOut(e.target.value);
-                        }}
-                        className="w-full px-2.5 py-2 rounded-lg bg-slate-900 border border-white/10 text-sm text-white focus:outline-none focus:border-indigo-500 cursor-pointer"
+                        type="text"
+                        placeholder="Type person name (e.g. Meng, Dara, Pich) and press Enter..."
+                        value={newPersonName}
+                        onChange={(e) => setNewPersonName(e.target.value)}
+                        className="w-full px-3.5 py-2.5 rounded-lg bg-slate-900 border border-white/10 text-sm text-white placeholder-slate-500 focus:outline-none focus:border-indigo-500"
                       />
                       <motion.button
                         whileHover={{ scale: 1.03 }}
                         whileTap={{ scale: 0.95 }}
                         type="submit"
-                        className="px-3.5 py-2 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white text-sm font-semibold flex items-center gap-1 shrink-0 shadow-md shadow-indigo-600/30 cursor-pointer"
+                        className="px-4 py-2.5 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white text-sm font-semibold flex items-center gap-1.5 shrink-0 shadow-md shadow-indigo-600/30 cursor-pointer"
                       >
                         <Plus className="w-4 h-4" />
-                        <span>Add</span>
+                        <span>Add Person</span>
                       </motion.button>
                     </div>
                   </div>
@@ -850,24 +882,57 @@ export default function PartyBillCalculator() {
                     <span>
                       {newPersonIsFreePass
                         ? "✨ Special Free Pass Active (Not counted in bill split)"
-                        : "Mark this person as Free Pass / Exempt ($0 share)"}
+                        : "Optional: Mark this new person as Free Pass / Exempt ($0 share)"}
                     </span>
                   </button>
 
                   <span className="text-[11px] text-slate-400">
-                    Duration:{" "}
+                    Auto-assigned:{" "}
                     <strong className="text-indigo-300">
-                      {formatDuration(getDurationMinutes(newPersonTimeIn, newPersonTimeOut))}
+                      {baseTimeIn} → {baseTimeOut} ({baseDurationFormatted})
                     </strong>
                   </span>
                 </div>
               </form>
 
-              {/* People List */}
+              {/* Quick Select Username for Free Pass Bar */}
+              {people.length > 0 ? (
+                <div className="mb-4 p-3 rounded-xl bg-amber-950/25 border border-amber-500/30 flex flex-wrap items-center justify-between gap-2">
+                  <div className="flex items-center gap-2 text-xs text-amber-200">
+                    <Crown className="w-4 h-4 text-amber-400 shrink-0" />
+                    <span>
+                      <strong>Free Payment by Select Username</strong> (click username to exclude from bill split):
+                    </span>
+                  </div>
+                  <div className="flex items-center gap-1.5 flex-wrap">
+                    {people.map((p) => (
+                      <button
+                        key={p.id}
+                        type="button"
+                        onClick={() => handleTogglePersonFreePass(p.id)}
+                        className={`px-2.5 py-1 rounded-full text-xs font-semibold transition-all cursor-pointer flex items-center gap-1 ${
+                          p.isFreePass
+                            ? "bg-amber-400 text-slate-950 shadow-sm shadow-amber-400/40"
+                            : "bg-slate-900 text-slate-300 border border-white/10 hover:border-amber-400/50"
+                        }`}
+                      >
+                        {p.isFreePass ? <Crown className="w-3 h-3" /> : null}
+                        <span>{p.name}</span>
+                        {p.isFreePass ? <span>(Free)</span> : null}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              ) : null}
+
+              {/* People List — Click "Update Time" on any person to customize their Time In / Out later! */}
               <div className="space-y-2.5">
                 <AnimatePresence initial={false}>
                   {calculation.personBreakdowns.map((b) => {
                     const { person, durationFormatted, sharePercentage, fairShare } = b;
+                    const isCustomTime = customTimePersonIds.has(person.id);
+                    const isEditingThisPerson = editingTimePersonId === person.id;
+
                     return (
                       <motion.div
                         key={person.id}
@@ -879,6 +944,8 @@ export default function PartyBillCalculator() {
                         className={`rounded-xl p-3.5 border transition-all ${
                           person.isFreePass
                             ? "bg-gradient-to-r from-amber-950/35 via-slate-900/90 to-slate-900/90 border-amber-500/40"
+                            : isCustomTime
+                            ? "bg-slate-950/80 border-fuchsia-500/35"
                             : "bg-slate-950/60 border-white/10 hover:border-indigo-500/30"
                         }`}
                       >
@@ -904,6 +971,17 @@ export default function PartyBillCalculator() {
                                     {durationFormatted} • {sharePercentage.toFixed(1)}% weight
                                   </span>
                                 )}
+                                <span
+                                  className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[11px] font-medium ${
+                                    isCustomTime
+                                      ? "bg-fuchsia-500/20 text-fuchsia-300 border border-fuchsia-500/30"
+                                      : "bg-slate-800/90 text-slate-400"
+                                  }`}
+                                >
+                                  <Clock className="w-3 h-3" />
+                                  {person.timeIn} → {person.timeOut}
+                                  {isCustomTime ? " (Updated)" : " (Base)"}
+                                </span>
                               </div>
                               <div className="text-xs text-slate-400 mt-0.5 flex items-center gap-2">
                                 <span>
@@ -918,80 +996,35 @@ export default function PartyBillCalculator() {
                                 </span>
                                 {b.paidTotal > 0 ? (
                                   <span className="text-emerald-400">
-                                    • Fronted {formatMoney(b.paidTotal)}
+                                    • Paid {formatMoney(b.paidTotal)}
                                   </span>
                                 ) : null}
                               </div>
                             </div>
                           </div>
 
-                          {/* Time In & Time Out Controls + Free Pass Toggle */}
+                          {/* Action Buttons: Update Time Later + Free Pass Toggle + Delete */}
                           <div className="flex flex-wrap items-center gap-2">
-                            {/* Time In Input + Quick +/- 30m */}
-                            <div className="flex items-center bg-slate-900 border border-white/10 rounded-lg px-2 py-1 gap-1">
-                              <span className="text-[10px] uppercase tracking-wider text-slate-400">
-                                In
-                              </span>
-                              <button
-                                type="button"
-                                onClick={() => handleNudgePersonTime(person.id, "timeIn", -30)}
-                                className="px-1 text-xs text-slate-400 hover:text-white cursor-pointer"
-                                title="Earlier 30m"
-                              >
-                                -
-                              </button>
-                              <input
-                                type="time"
-                                value={person.timeIn}
-                                onChange={(e) =>
-                                  handleUpdatePersonTime(person.id, "timeIn", e.target.value)
-                                }
-                                className="bg-transparent text-xs font-semibold text-indigo-200 focus:outline-none cursor-pointer"
-                              />
-                              <button
-                                type="button"
-                                onClick={() => handleNudgePersonTime(person.id, "timeIn", 30)}
-                                className="px-1 text-xs text-slate-400 hover:text-white cursor-pointer"
-                                title="Later 30m"
-                              >
-                                +
-                              </button>
-                            </div>
+                            <button
+                              type="button"
+                              onClick={() => {
+                                sound.playSwitch();
+                                setEditingTimePersonId(
+                                  isEditingThisPerson ? null : person.id
+                                );
+                              }}
+                              className={`px-3 py-1.5 rounded-lg text-xs font-semibold border transition-all cursor-pointer flex items-center gap-1.5 ${
+                                isEditingThisPerson
+                                  ? "bg-indigo-600 border-indigo-500 text-white"
+                                  : isCustomTime
+                                  ? "bg-fuchsia-500/15 border-fuchsia-500/40 text-fuchsia-300 hover:bg-fuchsia-500/25"
+                                  : "bg-slate-900 border-white/10 text-slate-300 hover:text-white hover:border-indigo-500/40"
+                              }`}
+                            >
+                              <Pencil className="w-3 h-3" />
+                              <span>{isEditingThisPerson ? "Done" : "Update Time"}</span>
+                            </button>
 
-                            <span className="text-slate-500 text-xs">→</span>
-
-                            {/* Time Out Input + Quick +/- 30m */}
-                            <div className="flex items-center bg-slate-900 border border-white/10 rounded-lg px-2 py-1 gap-1">
-                              <span className="text-[10px] uppercase tracking-wider text-slate-400">
-                                Out
-                              </span>
-                              <button
-                                type="button"
-                                onClick={() => handleNudgePersonTime(person.id, "timeOut", -30)}
-                                className="px-1 text-xs text-slate-400 hover:text-white cursor-pointer"
-                                title="Left 30m earlier"
-                              >
-                                -
-                              </button>
-                              <input
-                                type="time"
-                                value={person.timeOut}
-                                onChange={(e) =>
-                                  handleUpdatePersonTime(person.id, "timeOut", e.target.value)
-                                }
-                                className="bg-transparent text-xs font-semibold text-fuchsia-200 focus:outline-none cursor-pointer"
-                              />
-                              <button
-                                type="button"
-                                onClick={() => handleNudgePersonTime(person.id, "timeOut", 30)}
-                                className="px-1 text-xs text-slate-400 hover:text-white cursor-pointer"
-                                title="Stayed 30m later"
-                              >
-                                +
-                              </button>
-                            </div>
-
-                            {/* Free Pass Toggle Button */}
                             <button
                               type="button"
                               onClick={() => handleTogglePersonFreePass(person.id)}
@@ -1008,7 +1041,6 @@ export default function PartyBillCalculator() {
                               </span>
                             </button>
 
-                            {/* Remove Person */}
                             <button
                               type="button"
                               onClick={() => handleRemovePerson(person.id)}
@@ -1019,6 +1051,109 @@ export default function PartyBillCalculator() {
                             </button>
                           </div>
                         </div>
+
+                        {/* Expandable "Update Time Later" Drawer */}
+                        <AnimatePresence>
+                          {isEditingThisPerson ? (
+                            <motion.div
+                              initial={{ opacity: 0, height: 0 }}
+                              animate={{ opacity: 1, height: "auto" }}
+                              exit={{ opacity: 0, height: 0 }}
+                              className="overflow-hidden"
+                            >
+                              <div className="mt-3 pt-3 border-t border-white/10 flex flex-wrap items-center justify-between gap-2 bg-slate-900/70 p-2.5 rounded-lg">
+                                <div className="flex flex-wrap items-center gap-2">
+                                  {/* Time In Input + Quick +/- 30m */}
+                                  <div className="flex items-center bg-slate-950 border border-white/15 rounded-lg px-2.5 py-1 gap-1.5">
+                                    <span className="text-[10px] uppercase tracking-wider text-slate-400">
+                                      Time In
+                                    </span>
+                                    <button
+                                      type="button"
+                                      onClick={() =>
+                                        handleNudgePersonTime(person.id, "timeIn", -30)
+                                      }
+                                      className="px-1.5 py-0.5 rounded bg-slate-800 text-xs text-slate-300 hover:text-white cursor-pointer"
+                                    >
+                                      -30m
+                                    </button>
+                                    <input
+                                      type="time"
+                                      value={person.timeIn}
+                                      onChange={(e) =>
+                                        handleUpdatePersonTime(
+                                          person.id,
+                                          "timeIn",
+                                          e.target.value
+                                        )
+                                      }
+                                      className="bg-transparent text-xs font-bold text-indigo-200 focus:outline-none cursor-pointer"
+                                    />
+                                    <button
+                                      type="button"
+                                      onClick={() =>
+                                        handleNudgePersonTime(person.id, "timeIn", 30)
+                                      }
+                                      className="px-1.5 py-0.5 rounded bg-slate-800 text-xs text-slate-300 hover:text-white cursor-pointer"
+                                    >
+                                      +30m
+                                    </button>
+                                  </div>
+
+                                  <span className="text-slate-500 text-xs">→</span>
+
+                                  {/* Time Out Input + Quick +/- 30m */}
+                                  <div className="flex items-center bg-slate-950 border border-white/15 rounded-lg px-2.5 py-1 gap-1.5">
+                                    <span className="text-[10px] uppercase tracking-wider text-slate-400">
+                                      Time Out
+                                    </span>
+                                    <button
+                                      type="button"
+                                      onClick={() =>
+                                        handleNudgePersonTime(person.id, "timeOut", -30)
+                                      }
+                                      className="px-1.5 py-0.5 rounded bg-slate-800 text-xs text-slate-300 hover:text-white cursor-pointer"
+                                    >
+                                      -30m
+                                    </button>
+                                    <input
+                                      type="time"
+                                      value={person.timeOut}
+                                      onChange={(e) =>
+                                        handleUpdatePersonTime(
+                                          person.id,
+                                          "timeOut",
+                                          e.target.value
+                                        )
+                                      }
+                                      className="bg-transparent text-xs font-bold text-fuchsia-200 focus:outline-none cursor-pointer"
+                                    />
+                                    <button
+                                      type="button"
+                                      onClick={() =>
+                                        handleNudgePersonTime(person.id, "timeOut", 30)
+                                      }
+                                      className="px-1.5 py-0.5 rounded bg-slate-800 text-xs text-slate-300 hover:text-white cursor-pointer"
+                                    >
+                                      +30m
+                                    </button>
+                                  </div>
+                                </div>
+
+                                {isCustomTime ? (
+                                  <button
+                                    type="button"
+                                    onClick={() => handleResetPersonToBaseTime(person.id)}
+                                    className="px-2.5 py-1 rounded-lg text-xs bg-slate-800 hover:bg-slate-700 text-slate-300 flex items-center gap-1 cursor-pointer"
+                                  >
+                                    <RotateCcw className="w-3 h-3" />
+                                    <span>Use Base ({baseTimeIn}–{baseTimeOut})</span>
+                                  </button>
+                                ) : null}
+                              </div>
+                            </motion.div>
+                          ) : null}
+                        </AnimatePresence>
 
                         {/* Visual Stay Duration Progress Bar */}
                         <div className="mt-2.5 w-full h-1.5 bg-slate-900 rounded-full overflow-hidden">
@@ -1044,7 +1179,7 @@ export default function PartyBillCalculator() {
 
                 {people.length === 0 ? (
                   <div className="text-center py-8 text-slate-500 text-sm border border-dashed border-white/10 rounded-xl">
-                    No people in the party yet. Add someone above to start splitting!
+                    No people in the party yet. Set your Base Time In / Out above, then add people!
                   </div>
                 ) : null}
               </div>
@@ -1084,6 +1219,8 @@ export default function PartyBillCalculator() {
                       setPaymentCategory(item.category);
                       if (item.category === "treat") {
                         setPaymentIsFree(true);
+                      } else {
+                        setPaymentIsFree(false);
                       }
                     }}
                     className="px-2.5 py-1 rounded-full text-xs bg-slate-950/90 hover:bg-indigo-500/20 text-slate-300 hover:text-indigo-200 border border-white/10 transition-colors cursor-pointer"
@@ -1137,7 +1274,7 @@ export default function PartyBillCalculator() {
                     </label>
                     <div className="flex items-center gap-2">
                       <select
-                        value={paymentPaidBy}
+                        value={effectivePaidBy}
                         onChange={(e) => {
                           sound.playSwitch();
                           setPaymentPaidBy(e.target.value);
@@ -1149,6 +1286,9 @@ export default function PartyBillCalculator() {
                             {p.name}
                           </option>
                         ))}
+                        <option value={UNPAID_BILL_POT_ID}>
+                          🧾 Unpaid Table Bill (Pay Cashier)
+                        </option>
                       </select>
                       <motion.button
                         whileHover={{ scale: 1.03 }}
@@ -1199,6 +1339,12 @@ export default function PartyBillCalculator() {
                 <AnimatePresence initial={false}>
                   {payments.map((item) => {
                     const payer = people.find((p) => p.id === item.paidByPersonId);
+                    const resolvedPayerValue = payer
+                      ? payer.id
+                      : item.paidByPersonId === UNPAID_BILL_POT_ID
+                      ? UNPAID_BILL_POT_ID
+                      : people[0]?.id ?? UNPAID_BILL_POT_ID;
+
                     return (
                       <motion.div
                         key={item.id}
@@ -1246,7 +1392,7 @@ export default function PartyBillCalculator() {
                             <div className="flex items-center gap-2 mt-1 text-xs text-slate-400">
                               <span>Paid by username:</span>
                               <select
-                                value={item.paidByPersonId}
+                                value={resolvedPayerValue}
                                 onChange={(e) =>
                                   handleChangePaymentPayer(item.id, e.target.value)
                                 }
@@ -1257,6 +1403,9 @@ export default function PartyBillCalculator() {
                                     {p.name}
                                   </option>
                                 ))}
+                                <option value={UNPAID_BILL_POT_ID}>
+                                  🧾 Unpaid Table Bill (Pay Cashier)
+                                </option>
                               </select>
                               {item.isFreePayment && payer ? (
                                 <span className="text-amber-300/90 italic">
@@ -1539,9 +1688,27 @@ export default function PartyBillCalculator() {
                       );
                     })}
                   </div>
+                ) : payments.length > 0 && calculation.totalSharedPool === 0 ? (
+                  <div className="p-4 rounded-xl bg-amber-950/30 border border-amber-500/30 text-center space-y-2">
+                    <p className="text-xs text-amber-200">
+                      All current payments are marked as <strong>Special Free Treats</strong> (excluded from split).
+                    </p>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        sound.playCoin();
+                        setPayments((prev) =>
+                          prev.map((p) => ({ ...p, isFreePayment: false }))
+                        );
+                      }}
+                      className="px-3 py-1.5 rounded-lg bg-amber-500 hover:bg-amber-400 text-slate-950 text-xs font-bold cursor-pointer"
+                    >
+                      Convert Payments to Shared Split
+                    </button>
+                  </div>
                 ) : (
                   <div className="p-4 rounded-xl bg-slate-950/60 border border-white/5 text-center text-xs text-slate-400">
-                    All balances are settled or no shared payments need transfers!
+                    Add at least 2 people or a shared bill payment to see Who Pays Whom transfers!
                   </div>
                 )}
               </div>
